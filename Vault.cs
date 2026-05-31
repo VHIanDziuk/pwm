@@ -3,11 +3,12 @@ using System.Text.Json;
 namespace Pwm;
 
 record VaultEntry(
-    string Name,
-    string Username,
-    string Password,
-    string Url,
-    string Notes);
+    string  Name,
+    string  Username,
+    string  Password,
+    string  Url,
+    string  Notes,
+    string? TotpSecret = null);
 
 static class VaultStore
 {
