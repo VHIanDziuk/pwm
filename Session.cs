@@ -3,6 +3,36 @@ using System.Text;
 
 namespace Pwm;
 
+/// <summary>
+/// Manages the short-lived session token that caches the master password so
+/// subsequent commands within the TTL window do not require PBKDF2 re-derivation.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The master password is never stored in plaintext. Instead it is encrypted with a
+/// per-session ephemeral AES-256-GCM key that is stored alongside the ciphertext in
+/// the session file. This means:
+/// <list type="bullet">
+///   <item>An attacker who can read <c>~/.pwm/session</c> can recover the master password —
+///         the file is created with mode 600 (owner read/write only) to mitigate this.</item>
+///   <item>The design trades the cost of PBKDF2 (slow by design) for an ephemeral AES key
+///         (fast), so 15-minute interactive sessions feel responsive.</item>
+///   <item>The ephemeral key provides no cryptographic hardening against an attacker with
+///         filesystem read access; its purpose is to avoid storing the password in plaintext
+///         and to make accidental exposure (e.g. log files) less dangerous.</item>
+/// </list>
+/// </para>
+/// <para>
+/// Session file layout:
+/// <code>
+///   expiry         8 bytes  — big-endian int64 Unix seconds
+///   nonce         12 bytes  — AES-GCM nonce
+///   tag           16 bytes  — AES-GCM authentication tag
+///   ciphertext    variable  — UTF-8 master password, AES-GCM encrypted
+///   ephemeral_key 32 bytes  — raw AES-256 key (appended at end)
+/// </code>
+/// </para>
+/// </remarks>
 static class SessionStore
 {
     private static readonly string SessionPath =
@@ -23,6 +53,21 @@ static class SessionStore
     private const int EphemeralKeySize = 32;
     private const int MinFileSize      = ExpirySize + NonceSize + TagSize + EphemeralKeySize;
 
+    /// <summary>
+    /// Encrypts <paramref name="masterPassword"/> with a fresh ephemeral key and writes
+    /// the session file, silently ignoring any I/O error.
+    /// </summary>
+    /// <param name="masterPassword">The plaintext master password to cache.</param>
+    /// <param name="ttlSeconds">
+    /// How many seconds the session remains valid. Defaults to 900 (15 minutes).
+    /// Configurable via <c>~/.pwm/config.toml</c> (<c>session_ttl_seconds</c>).
+    /// </param>
+    /// <remarks>
+    /// All sensitive byte arrays (plaintext password, ephemeral key, assembled blob) are
+    /// zeroed with <see cref="CryptographicOperations.ZeroMemory"/> before the method returns.
+    /// The method swallows all exceptions so a non-writeable filesystem never prevents a
+    /// command from succeeding — it just means the next command will prompt again.
+    /// </remarks>
     public static void TrySave(string masterPassword, int ttlSeconds = 900)
     {
         try
@@ -72,6 +117,18 @@ static class SessionStore
         catch { }
     }
 
+    /// <summary>
+    /// Reads and decrypts the session file, returning the cached master password.
+    /// </summary>
+    /// <returns>
+    /// The master password if a valid, non-expired session exists; otherwise <see langword="null"/>.
+    /// </returns>
+    /// <remarks>
+    /// Returns <see langword="null"/> and calls <see cref="Delete"/> if the session has
+    /// expired, is malformed, or if decryption fails (which would indicate the file was
+    /// tampered with). Callers should prompt for the master password whenever
+    /// <see langword="null"/> is returned.
+    /// </remarks>
     public static string? TryLoad()
     {
         try
@@ -124,6 +181,10 @@ static class SessionStore
         }
     }
 
+    /// <summary>
+    /// Deletes the session file, forcing the next command to re-prompt for the master password.
+    /// Silently ignores errors (e.g. file already absent).
+    /// </summary>
     public static void Delete()
     {
         try { File.Delete(SessionPath); } catch { }
