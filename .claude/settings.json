@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(dotnet build*)",
+      "Bash(dotnet run*)",
+      "Bash(dotnet restore*)",
+      "Bash(dotnet publish*)",
+      "Bash(pwm list*)",
+      "Bash(pwm get *)",
+      "Bash(find ~/.nuget *)",
+      "Read",
+      "Bash(find ~/.nuget -path \"*/System.CommandLine/2.0.0-beta4*\" -name \"*.dll\" 2>/dev/null | head -5)",
+      "Read(//Users/iandziuk/.nuget/**)",
+      "Bash(dotnet-script)",
+      "Read(//private/tmp/**)",
+      "Bash(dotnet fsi *)",
+      "WebSearch",
+      "Bash(dotnet test *)",
+      "Bash(python3 /tmp/pwm_test_v12.py)"
+    ],
+    "deny": [
+      "Bash(pwm delete*)",
+      "Bash(pwm update*)",
+      "Bash(git reset --hard*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git branch -D*)",
+      "Bash(git clean*)",
+      "Bash(rm *)",
+      "Bash(rm)",
+      "Bash(Remove-Item*)",
+      "Bash(del *)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/private/tmp"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "afplay /System/Library/Sounds/Glass.aiff"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "afplay /System/Library/Sounds/Glass.aiff"
+          }
+        ]
+      }
+    ]
+  },
+  "skipWorkflowUsageWarning": true
+}

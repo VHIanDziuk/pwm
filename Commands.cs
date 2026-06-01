@@ -1,4 +1,6 @@
 using System.CommandLine;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -8,48 +10,60 @@ static class Commands
 {
     public static RootCommand Build()
     {
+        var config = PwmConfig.Load();
         var root = new RootCommand("pwm — password manager");
 
-        root.AddCommand(BuildAdd());
-        root.AddCommand(BuildGet());
-        root.AddCommand(BuildList());
-        root.AddCommand(BuildUpdate());
-        root.AddCommand(BuildDelete());
-        root.AddCommand(BuildExport());
-        root.AddCommand(BuildImport());
-        root.AddCommand(BuildGenerate());
+        root.AddCommand(BuildAdd(config));
+        root.AddCommand(BuildGet(config));
+        root.AddCommand(BuildList(config));
+        root.AddCommand(BuildUpdate(config));
+        root.AddCommand(BuildDelete(config));
+        root.AddCommand(BuildExport(config));
+        root.AddCommand(BuildImport(config));
+        root.AddCommand(BuildGenerate(config));
         root.AddCommand(BuildLock());
 
         return root;
     }
 
-    // Returns master password from an active session or by prompting the user.
-    private static string ObtainMasterPassword()
+    // Returns master password from an active session or by prompting the user,
+    // plus whether it came from the session.
+    private static (string master, bool fromSession) ObtainMasterPassword()
     {
         var fromSession = SessionStore.TryLoad();
         if (fromSession is not null)
-            return fromSession;
-        return ReadPassword("Master password: ");
+            return (fromSession, true);
+        return (ReadPassword("Master password: "), false);
     }
 
-    // Persists a session token after a successful vault unlock.
-    private static void PersistSession(string master) =>
-        SessionStore.TrySave(master, ttlSeconds: 900);
+    private static void DecryptFailed(bool usedSession)
+    {
+        if (usedSession)
+            Console.Error.WriteLine("Error: vault is corrupt or has been tampered with.");
+        else
+            Console.Error.WriteLine("Error: wrong master password (or vault is corrupt/tampered).");
+        Environment.Exit(1);
+    }
 
-    private static Command BuildAdd()
+    private static Command BuildAdd(PwmConfig config)
     {
         var nameArg = new Argument<string>("name");
         var totpOpt = new Option<string?>("--totp-secret", "Base32-encoded TOTP secret (optional)");
-        var cmd = new Command("add", "Add a new entry") { nameArg, totpOpt };
-
-        cmd.SetHandler((string name, string? totpSecret) =>
+        var tagOpt  = new Option<string[]>("--tag", "Tag to assign (repeatable)")
         {
-            var master = ObtainMasterPassword();
+            AllowMultipleArgumentsPerToken = true,
+            Arity = ArgumentArity.ZeroOrMore,
+        };
+        var cmd = new Command("add", "Add a new entry") { nameArg, totpOpt, tagOpt };
+
+        cmd.SetHandler((string name, string? totpSecret, string[] tags) =>
+        {
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
             if (entries.Any(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
             {
@@ -62,26 +76,29 @@ static class Commands
             var url      = Prompt("URL: ");
             var notes    = Prompt("Notes: ");
 
-            entries.Add(new VaultEntry(name, username, password, url, notes, totpSecret));
-            VaultStore.Save(entries, master);
-        }, nameArg, totpOpt);
+            List<string>? tagList = tags.Length > 0 ? [..tags] : null;
+
+            entries.Add(new VaultEntry(name, username, password, url, notes, totpSecret, tagList));
+            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
+        }, nameArg, totpOpt, tagOpt);
 
         return cmd;
     }
 
-    private static Command BuildGet()
+    private static Command BuildGet(PwmConfig config)
     {
         var nameArg = new Argument<string>("name");
-        var cmd = new Command("get", "Retrieve an entry") { nameArg };
+        var clipOpt = new Option<bool>("--clip", "Copy password to clipboard instead of printing it");
+        var cmd = new Command("get", "Retrieve an entry") { nameArg, clipOpt };
 
-        cmd.SetHandler((string name) =>
+        cmd.SetHandler((string name, bool clip) =>
         {
-            var master = ObtainMasterPassword();
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
             var entry = entries.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
             if (entry is null)
@@ -104,49 +121,75 @@ static class Commands
 
             Console.WriteLine($"Name:     {entry.Name}");
             Console.WriteLine($"Username: {entry.Username}");
-            Console.WriteLine($"Password: {entry.Password}");
+
+            if (clip)
+            {
+                CopyToClipboard(entry.Password);
+                ScheduleClipboardClear(config.ClipboardClearSeconds);
+                Console.Error.WriteLine($"Password copied to clipboard (cleared in {config.ClipboardClearSeconds}s)");
+            }
+            else
+            {
+                Console.WriteLine($"Password: {entry.Password}");
+            }
+
             Console.WriteLine($"URL:      {entry.Url}");
             Console.WriteLine($"Notes:    {entry.Notes}");
-        }, nameArg);
+
+            if (entry.Tags is { Count: > 0 })
+                Console.WriteLine($"Tags:     {string.Join(", ", entry.Tags)}");
+        }, nameArg, clipOpt);
 
         return cmd;
     }
 
-    private static Command BuildList()
+    private static Command BuildList(PwmConfig config)
     {
-        var cmd = new Command("list", "List all entry names");
+        var tagOpt = new Option<string?>("--tag", "Filter entries by tag");
+        var cmd = new Command("list", "List all entry names") { tagOpt };
 
-        cmd.SetHandler(() =>
+        cmd.SetHandler((string? tag) =>
         {
-            var master = ObtainMasterPassword();
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
-            var names = entries.Select(e => e.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+            IEnumerable<VaultEntry> filtered = entries;
+            if (tag is not null)
+                filtered = entries.Where(e =>
+                    e.Tags is not null &&
+                    e.Tags.Any(t => string.Equals(t, tag, StringComparison.OrdinalIgnoreCase)));
+
+            var names = filtered.Select(e => e.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
             if (names.Count == 0) { Console.WriteLine("(no entries)"); return; }
             foreach (var n in names) Console.WriteLine(n);
-        });
+        }, tagOpt);
 
         return cmd;
     }
 
-    private static Command BuildUpdate()
+    private static Command BuildUpdate(PwmConfig config)
     {
         var nameArg = new Argument<string>("name");
         var totpOpt = new Option<string?>("--totp-secret", "Base32-encoded TOTP secret (empty string to clear)");
-        var cmd = new Command("update", "Update an existing entry") { nameArg, totpOpt };
-
-        cmd.SetHandler((string name, string? totpSecret) =>
+        var tagOpt  = new Option<string[]>("--tag", "Replace all tags (repeatable; omit to keep existing)")
         {
-            var master = ObtainMasterPassword();
+            AllowMultipleArgumentsPerToken = true,
+            Arity = ArgumentArity.ZeroOrMore,
+        };
+        var cmd = new Command("update", "Update an existing entry") { nameArg, totpOpt, tagOpt };
+
+        cmd.SetHandler((string name, string? totpSecret, string[] tags) =>
+        {
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
             var idx = entries.FindIndex(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
             if (idx < 0)
@@ -163,31 +206,37 @@ static class Commands
             var url      = PromptWithCurrent("URL", old.Url);
             var notes    = PromptWithCurrent("Notes", old.Notes);
 
-            // --totp-secret supplied: empty string clears it, non-empty sets it; null keeps existing.
             string? newTotp = totpSecret is not null
                 ? (totpSecret.Length > 0 ? totpSecret : null)
                 : old.TotpSecret;
 
-            entries[idx] = new VaultEntry(old.Name, username, password, url, notes, newTotp);
-            VaultStore.Save(entries, master);
-        }, nameArg, totpOpt);
+            // --tag present on command line replaces all tags; absent keeps old.
+            bool tagFlagPresent = Environment.GetCommandLineArgs()
+                .Any(a => string.Equals(a, "--tag", StringComparison.OrdinalIgnoreCase));
+            List<string>? newTags = tagFlagPresent
+                ? (tags.Length > 0 ? [..tags] : null)
+                : old.Tags;
+
+            entries[idx] = new VaultEntry(old.Name, username, password, url, notes, newTotp, newTags);
+            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
+        }, nameArg, totpOpt, tagOpt);
 
         return cmd;
     }
 
-    private static Command BuildDelete()
+    private static Command BuildDelete(PwmConfig config)
     {
         var nameArg = new Argument<string>("name");
         var cmd = new Command("delete", "Delete an entry") { nameArg };
 
         cmd.SetHandler((string name) =>
         {
-            var master = ObtainMasterPassword();
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
             var idx = entries.FindIndex(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
             if (idx < 0)
@@ -206,25 +255,25 @@ static class Commands
             }
 
             entries.RemoveAt(idx);
-            VaultStore.Save(entries, master);
+            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
         }, nameArg);
 
         return cmd;
     }
 
-    private static Command BuildExport()
+    private static Command BuildExport(PwmConfig config)
     {
         var outOpt = new Option<string?>("--out", "Output file path (default: ./pwm-export-<timestamp>.json)");
         var cmd = new Command("export", "Export vault entries to a plaintext JSON file") { outOpt };
 
         cmd.SetHandler((string? outPath) =>
         {
-            var master = ObtainMasterPassword();
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
             var resolvedPath = outPath ?? $"./pwm-export-{DateTime.UtcNow:yyyyMMddHHmmss}.json";
 
@@ -239,7 +288,7 @@ static class Commands
         return cmd;
     }
 
-    private static Command BuildImport()
+    private static Command BuildImport(PwmConfig config)
     {
         var pathArg      = new Argument<string>("path", "Path to a pwm export JSON file");
         var overwriteOpt = new Option<bool>("--overwrite", "Overwrite existing entries with imported ones");
@@ -268,12 +317,12 @@ static class Commands
                 return;
             }
 
-            var master = ObtainMasterPassword();
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
             int importedCount = 0;
             int skippedCount  = 0;
@@ -301,14 +350,14 @@ static class Commands
                 }
             }
 
-            VaultStore.Save(entries, master);
+            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
             Console.WriteLine($"Imported {importedCount} entries, skipped {skippedCount}.");
         }, pathArg, overwriteOpt);
 
         return cmd;
     }
 
-    private static Command BuildGenerate()
+    private static Command BuildGenerate(PwmConfig config)
     {
         var nameArg      = new Argument<string>("name");
         var lengthOpt    = new Option<int>("--length", () => 24, "Password length (default 24)");
@@ -327,12 +376,12 @@ static class Commands
                 return;
             }
 
-            var master = ObtainMasterPassword();
+            var (master, fromSession) = ObtainMasterPassword();
             List<VaultEntry> entries;
             try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { WrongPassword(); return; }
+            catch (CryptographicException) { DecryptFailed(fromSession); return; }
 
-            PersistSession(master);
+            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
 
             if (entries.Any(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
             {
@@ -354,7 +403,7 @@ static class Commands
             var notes    = Prompt("Notes (optional): ");
 
             entries.Add(new VaultEntry(name, username, password, url, notes));
-            VaultStore.Save(entries, master);
+            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
 
             Console.WriteLine($"Generated password: {password}");
         }, nameArg, lengthOpt, noSymbolsOpt);
@@ -371,6 +420,37 @@ static class Commands
             Console.WriteLine("Session locked.");
         });
         return cmd;
+    }
+
+    private static void CopyToClipboard(string text)
+    {
+        ProcessStartInfo psi;
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            psi = new ProcessStartInfo { FileName = "pbcopy", RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true };
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            psi = new ProcessStartInfo { FileName = "xclip", Arguments = "-selection clipboard", RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true };
+        else
+            psi = new ProcessStartInfo { FileName = "clip", RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true };
+
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write(text);
+        proc.StandardInput.Close();
+        proc.WaitForExit();
+    }
+
+    private static void ScheduleClipboardClear(int delaySecs)
+    {
+        ProcessStartInfo psi;
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            psi = new ProcessStartInfo { FileName = "sh", Arguments = $"-c \"sleep {delaySecs} && echo -n '' | pbcopy\"", UseShellExecute = false, CreateNoWindow = true };
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            psi = new ProcessStartInfo { FileName = "sh", Arguments = $"-c \"sleep {delaySecs} && echo -n '' | xclip -selection clipboard\"", UseShellExecute = false, CreateNoWindow = true };
+        else
+            psi = new ProcessStartInfo { FileName = "cmd", Arguments = $"/c \"timeout /t {delaySecs} /nobreak >nul && echo. | clip\"", UseShellExecute = false, CreateNoWindow = true };
+
+        Process.Start(psi); // fire-and-forget
     }
 
     private static string GeneratePassword(string charset, int length)
@@ -433,11 +513,5 @@ static class Commands
         Console.Write($"{label} [leave blank to keep]: ");
         var input = ReadPassword(string.Empty);
         return input.Length > 0 ? input : current;
-    }
-
-    private static void WrongPassword()
-    {
-        Console.Error.WriteLine("Error: wrong master password.");
-        Environment.Exit(1);
     }
 }

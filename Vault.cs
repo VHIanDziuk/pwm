@@ -3,12 +3,13 @@ using System.Text.Json;
 namespace Pwm;
 
 record VaultEntry(
-    string  Name,
-    string  Username,
-    string  Password,
-    string  Url,
-    string  Notes,
-    string? TotpSecret = null);
+    string        Name,
+    string        Username,
+    string        Password,
+    string        Url,
+    string        Notes,
+    string?       TotpSecret = null,
+    List<string>? Tags       = null);
 
 static class VaultStore
 {
@@ -29,12 +30,12 @@ static class VaultStore
         return JsonSerializer.Deserialize<List<VaultEntry>>(json)!;
     }
 
-    public static void Save(List<VaultEntry> entries, string masterPassword)
+    public static void Save(List<VaultEntry> entries, string masterPassword, int iterations = 600_000)
     {
         Directory.CreateDirectory(VaultDir);
 
         var json = JsonSerializer.Serialize(entries);
-        var blob = Crypto.Encrypt(json, masterPassword);
+        var blob = Crypto.Encrypt(json, masterPassword, iterations);
 
         var tmp = VaultPath + ".tmp";
         File.WriteAllBytes(tmp, blob);
