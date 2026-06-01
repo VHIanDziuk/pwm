@@ -33,6 +33,7 @@ static class Commands
         root.AddCommand(BuildImport(config));
         root.AddCommand(BuildGenerate(config));
         root.AddCommand(BuildLock());
+        root.AddCommand(BuildDaemon(config));
 
         return root;
     }
@@ -78,6 +79,88 @@ static class Commands
         Environment.Exit(1);
     }
 
+    /// <summary>
+    /// Loads all vault entries, routing through the daemon if it is running or
+    /// falling back to direct PBKDF2 decryption otherwise.
+    /// </summary>
+    /// <remarks>
+    /// When the daemon is running but locked, this method prompts for the master
+    /// password, sends an "unlock" request to the daemon, then retrieves the entries.
+    /// If the daemon rejects the password it falls through to the direct path, which
+    /// will also fail and call <see cref="DecryptFailed"/>.
+    /// </remarks>
+    private static (List<VaultEntry> entries, string master, bool fromSession, bool viaDaemon)
+        LoadEntries(PwmConfig config)
+    {
+        if (DaemonClient.IsRunning())
+        {
+            // Check if daemon already has the vault unlocked.
+            var unlocked = DaemonClient.GetUnlockedStatus();
+
+            if (unlocked != true)
+            {
+                // Need to unlock the daemon.
+                var (master, fromSess) = ObtainMasterPassword();
+                bool ok = DaemonClient.Unlock(master);
+                if (!ok)
+                {
+                    DecryptFailed(fromSess);
+                    return default!;
+                }
+                SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+                var (entries2, err2) = DaemonClient.GetAll();
+                if (entries2 is null)
+                {
+                    Console.Error.WriteLine($"Error: daemon error — {err2}");
+                    Environment.Exit(1);
+                    return default!;
+                }
+                return (entries2, master, fromSess, true);
+            }
+            else
+            {
+                // Already unlocked — get entries directly without a password prompt.
+                var (entries3, err3) = DaemonClient.GetAll();
+                if (entries3 is null)
+                {
+                    Console.Error.WriteLine($"Error: daemon error — {err3}");
+                    Environment.Exit(1);
+                    return default!;
+                }
+                return (entries3, string.Empty, true, true);
+            }
+        }
+
+        // No daemon — direct path.
+        var (directMaster, directFromSession) = ObtainMasterPassword();
+        List<VaultEntry> directEntries;
+        try { directEntries = VaultStore.Load(directMaster); }
+        catch (CryptographicException) { DecryptFailed(directFromSession); return default!; }
+        SessionStore.TrySave(directMaster, ttlSeconds: config.SessionTtlSeconds);
+        return (directEntries, directMaster, directFromSession, false);
+    }
+
+    /// <summary>
+    /// Saves vault entries, routing through the daemon if it was used to load them,
+    /// or writing directly otherwise.
+    /// </summary>
+    private static void SaveEntries(List<VaultEntry> entries, string master, bool viaDaemon, int iterations)
+    {
+        if (viaDaemon)
+        {
+            var (ok, err) = DaemonClient.Save(entries, iterations);
+            if (!ok)
+            {
+                Console.Error.WriteLine($"Error: daemon save failed — {err}");
+                Environment.Exit(1);
+            }
+        }
+        else
+        {
+            VaultStore.Save(entries, master, iterations);
+        }
+    }
+
     private static Command BuildAdd(PwmConfig config)
     {
         var nameArg = new Argument<string>("name");
@@ -91,12 +174,7 @@ static class Commands
 
         cmd.SetHandler((string name, string? totpSecret, string[] tags) =>
         {
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, master, _, viaDaemon) = LoadEntries(config);
 
             if (entries.Any(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
             {
@@ -112,7 +190,7 @@ static class Commands
             List<string>? tagList = tags.Length > 0 ? [..tags] : null;
 
             entries.Add(new VaultEntry(name, username, password, url, notes, totpSecret, tagList));
-            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
+            SaveEntries(entries, master, viaDaemon, config.Pbkdf2Iterations);
         }, nameArg, totpOpt, tagOpt);
 
         return cmd;
@@ -137,12 +215,7 @@ static class Commands
 
         cmd.SetHandler((string name, bool clip) =>
         {
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, _, _, _) = LoadEntries(config);
 
             var entry = entries.FirstOrDefault(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
             if (entry is null)
@@ -194,12 +267,7 @@ static class Commands
 
         cmd.SetHandler((string? tag) =>
         {
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, _, _, _) = LoadEntries(config);
 
             IEnumerable<VaultEntry> filtered = entries;
             if (tag is not null)
@@ -240,12 +308,7 @@ static class Commands
 
         cmd.SetHandler((string name, string? totpSecret, string[] tags) =>
         {
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, master, _, viaDaemon) = LoadEntries(config);
 
             var idx = entries.FindIndex(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
             if (idx < 0)
@@ -274,7 +337,7 @@ static class Commands
                 : old.Tags;
 
             entries[idx] = new VaultEntry(old.Name, username, password, url, notes, newTotp, newTags);
-            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
+            SaveEntries(entries, master, viaDaemon, config.Pbkdf2Iterations);
         }, nameArg, totpOpt, tagOpt);
 
         return cmd;
@@ -287,12 +350,7 @@ static class Commands
 
         cmd.SetHandler((string name) =>
         {
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, master, _, viaDaemon) = LoadEntries(config);
 
             var idx = entries.FindIndex(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase));
             if (idx < 0)
@@ -311,7 +369,7 @@ static class Commands
             }
 
             entries.RemoveAt(idx);
-            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
+            SaveEntries(entries, master, viaDaemon, config.Pbkdf2Iterations);
         }, nameArg);
 
         return cmd;
@@ -334,12 +392,7 @@ static class Commands
 
         cmd.SetHandler((string? outPath) =>
         {
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, _, _, _) = LoadEntries(config);
 
             var resolvedPath = outPath ?? $"./pwm-export-{DateTime.UtcNow:yyyyMMddHHmmss}.json";
 
@@ -383,12 +436,7 @@ static class Commands
                 return;
             }
 
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, master, _, viaDaemon) = LoadEntries(config);
 
             int importedCount = 0;
             int skippedCount  = 0;
@@ -416,7 +464,7 @@ static class Commands
                 }
             }
 
-            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
+            SaveEntries(entries, master, viaDaemon, config.Pbkdf2Iterations);
             Console.WriteLine($"Imported {importedCount} entries, skipped {skippedCount}.");
         }, pathArg, overwriteOpt);
 
@@ -452,12 +500,7 @@ static class Commands
                 return;
             }
 
-            var (master, fromSession) = ObtainMasterPassword();
-            List<VaultEntry> entries;
-            try { entries = VaultStore.Load(master); }
-            catch (CryptographicException) { DecryptFailed(fromSession); return; }
-
-            SessionStore.TrySave(master, ttlSeconds: config.SessionTtlSeconds);
+            var (entries, master, _, viaDaemon) = LoadEntries(config);
 
             if (entries.Any(e => string.Equals(e.Name, name, StringComparison.OrdinalIgnoreCase)))
             {
@@ -479,7 +522,7 @@ static class Commands
             var notes    = Prompt("Notes (optional): ");
 
             entries.Add(new VaultEntry(name, username, password, url, notes));
-            VaultStore.Save(entries, master, config.Pbkdf2Iterations);
+            SaveEntries(entries, master, viaDaemon, config.Pbkdf2Iterations);
 
             if (clip)
             {
@@ -504,6 +547,95 @@ static class Commands
             SessionStore.Delete();
             Console.WriteLine("Session locked.");
         });
+        return cmd;
+    }
+
+    /// <summary>
+    /// Builds the <c>daemon</c> subcommand with <c>start</c>, <c>stop</c>, and <c>status</c> sub-subcommands.
+    /// </summary>
+    private static Command BuildDaemon(PwmConfig config)
+    {
+        var cmd = new Command("daemon", "Manage the pwmd background daemon");
+
+        // daemon start
+        var startCmd = new Command("start", "Start the pwmd daemon in the background");
+        startCmd.SetHandler(() =>
+        {
+            if (DaemonClient.IsRunning())
+            {
+                Console.WriteLine("pwmd is already running.");
+                return;
+            }
+
+            // Re-launch this same binary with the internal "__daemon" flag so the
+            // child becomes the server process.
+            var self = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+            if (self is null)
+            {
+                Console.Error.WriteLine("Error: cannot determine process path.");
+                Environment.Exit(1);
+                return;
+            }
+
+            // Redirect all stdio to null so the daemon is fully detached from the
+            // parent's pipes (important when the parent is invoked under test harnesses
+            // or shell redirects that would otherwise keep the child's pipes open).
+            var psi = new ProcessStartInfo
+            {
+                FileName               = self,
+                Arguments              = $"__daemon {config.DaemonIdleSeconds}",
+                UseShellExecute        = false,
+                CreateNoWindow         = true,
+                RedirectStandardInput  = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+            };
+
+            var daemonProc = Process.Start(psi)!;
+            // Close the redirected streams immediately — we don't want to read them.
+            daemonProc.StandardInput.Close();
+            daemonProc.StandardOutput.Close();
+            daemonProc.StandardError.Close();
+
+            // Wait up to 2 s for the socket to appear.
+            for (int i = 0; i < 20; i++)
+            {
+                System.Threading.Thread.Sleep(100);
+                if (DaemonClient.IsRunning()) { Console.WriteLine("pwmd started."); return; }
+            }
+            Console.WriteLine("pwmd started (socket not yet ready — it may take a moment).");
+        });
+
+        // daemon stop
+        var stopCmd = new Command("stop", "Stop the running pwmd daemon");
+        stopCmd.SetHandler(() =>
+        {
+            if (!DaemonClient.IsRunning())
+            {
+                Console.WriteLine("pwmd is not running.");
+                return;
+            }
+            DaemonClient.Stop();
+            Console.WriteLine("pwmd stopped.");
+        });
+
+        // daemon status
+        var statusCmd = new Command("status", "Show whether pwmd is running and whether the vault is unlocked");
+        statusCmd.SetHandler(() =>
+        {
+            var unlocked = DaemonClient.GetUnlockedStatus();
+            if (unlocked is null)
+            {
+                Console.WriteLine("pwmd: not running");
+                return;
+            }
+            Console.WriteLine(unlocked.Value ? "pwmd: running, vault unlocked" : "pwmd: running, vault locked");
+        });
+
+        cmd.AddCommand(startCmd);
+        cmd.AddCommand(stopCmd);
+        cmd.AddCommand(statusCmd);
+
         return cmd;
     }
 

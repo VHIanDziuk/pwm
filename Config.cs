@@ -30,6 +30,12 @@ class PwmConfig
     /// </summary>
     public int Pbkdf2Iterations      { get; set; } = 600_000;
 
+    /// <summary>
+    /// How many seconds the <c>pwmd</c> daemon waits without receiving a request
+    /// before zeroing the in-memory vault and locking itself. Default: 900 (15 minutes).
+    /// </summary>
+    public int DaemonIdleSeconds     { get; set; } = 900;
+
     private static readonly string ConfigPath =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pwm", "config.toml");
 
@@ -64,6 +70,8 @@ class PwmConfig
                     cfg.ClipboardClearSeconds = v; break;
                 case "pbkdf2_iterations"       when int.TryParse(value, out var v) && v >= 100_000:
                     cfg.Pbkdf2Iterations = v; break;
+                case "daemon_idle_seconds"     when int.TryParse(value, out var v) && v > 0:
+                    cfg.DaemonIdleSeconds = v; break;
             }
         }
 
