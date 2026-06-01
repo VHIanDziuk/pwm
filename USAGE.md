@@ -12,12 +12,33 @@
 
 ```bash
 cd /path/to/pwm
-dotnet publish -c Release -r osx-arm64 --self-contained true -o ./publish
-# Replace osx-arm64 with your RID (linux-x64, osx-x64, win-x64, etc.)
-sudo ln -s "$(pwd)/publish/pwm" /usr/local/bin/pwm
+
+# Pick the RID that matches your machine:
+#   osx-x64   — macOS on Intel
+#   osx-arm64 — macOS on Apple Silicon (M1/M2/M3)
+#   linux-x64 — Linux x86-64
+dotnet publish -c Release -r osx-x64 --self-contained true -o ./publish
+
+# Create ~/.local/bin if it doesn't exist, then symlink (no sudo required)
+mkdir -p ~/.local/bin
+ln -s "$(pwd)/publish/pwm" ~/.local/bin/pwm
+```
+
+Add `~/.local/bin` to your PATH if it isn't already (add this to `~/.zshrc` or `~/.bashrc`):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then reload your shell:
+
+```bash
+source ~/.zshrc   # or source ~/.bashrc
 ```
 
 After this, `pwm` is available anywhere in your shell.
+
+> **Tip:** If you ever rebuild `publish/` (e.g. to switch RID), the symlink keeps working — no need to recreate it.
 
 ### Option 2: Run from source
 
@@ -51,10 +72,12 @@ $ pwm get github
 Master password: ********
 Name:     github
 Username: iandziuk
-Password: hunter2
 URL:      https://github.com
 Notes:    personal account
+Password copied to clipboard (cleared in 30s)
 ```
+
+The password is copied to your clipboard and never printed. Use `--show` to print it instead (for scripts or Claude automation).
 
 After this first unlock, a session token is cached for 15 minutes so you won't be prompted again.
 
@@ -233,7 +256,7 @@ Notes: personal account
 
 ### `pwm get <name>`
 
-Retrieve a single entry and print all fields to stdout. Password is printed in plaintext by default. This is intentional for scripting and automation.
+Retrieve a single entry. By default the password is copied to the clipboard and cleared after 30 seconds — it is never printed. Use `--show` to print it to stdout instead (for scripting and automation).
 
 If a TOTP secret is stored on the entry, you will be prompted for the current 6-digit code before credentials are shown.
 
@@ -241,30 +264,30 @@ If a TOTP secret is stored on the entry, you will be prompted for the current 6-
 
 | Option | Description |
 |---|---|
-| `--clip` | Copy password to clipboard instead of printing it; clears after 30 s |
+| `--show` | Print password to stdout instead of copying to clipboard |
 
-**Example**
+**Example (default — clipboard)**
 
 ```
 $ pwm get github
-Name:     github
-Username: iandziuk
-Password: hunter2
-URL:      https://github.com
-Notes:    personal account
-Tags:     work, git
-```
-
-**Clipboard mode**
-
-```
-$ pwm get github --clip
 Name:     github
 Username: iandziuk
 URL:      https://github.com
 Notes:    personal account
 Tags:     work, git
 Password copied to clipboard (cleared in 30s)
+```
+
+**Print mode**
+
+```
+$ pwm get github --show
+Name:     github
+Username: iandziuk
+Password: hunter2
+URL:      https://github.com
+Notes:    personal account
+Tags:     work, git
 ```
 
 ---
@@ -516,7 +539,7 @@ The vault format is platform-independent.
 **Example: Claude reads credentials to authenticate into a service**
 
 ```bash
-pwm get github
+pwm get github --show
 # Claude receives:
 # Name:     github
 # Username: iandziuk
@@ -525,6 +548,6 @@ pwm get github
 # Notes:    personal account
 ```
 
-Claude can invoke `pwm get <name>` as a shell command and parse the output to extract the username, password, and URL before performing a login or API call on the user's behalf.
+Claude can invoke `pwm get <name> --show` as a shell command and parse the output to extract the username, password, and URL before performing a login or API call on the user's behalf.
 
 Use this only in trusted environments where stdout is not being captured by unintended processes.

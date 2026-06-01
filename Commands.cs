@@ -210,10 +210,10 @@ static class Commands
     private static Command BuildGet(PwmConfig config)
     {
         var nameArg = new Argument<string>("name");
-        var clipOpt = new Option<bool>("--clip", "Copy password to clipboard instead of printing it");
-        var cmd = new Command("get", "Retrieve an entry") { nameArg, clipOpt };
+        var showOpt = new Option<bool>("--show", "Print password to stdout instead of copying to clipboard");
+        var cmd = new Command("get", "Retrieve an entry (password copied to clipboard by default)") { nameArg, showOpt };
 
-        cmd.SetHandler((string name, bool clip) =>
+        cmd.SetHandler((string name, bool show) =>
         {
             var (entries, _, _, _) = LoadEntries(config);
 
@@ -239,15 +239,15 @@ static class Commands
             Console.WriteLine($"Name:     {entry.Name}");
             Console.WriteLine($"Username: {entry.Username}");
 
-            if (clip)
+            if (show)
+            {
+                Console.WriteLine($"Password: {entry.Password}");
+            }
+            else
             {
                 CopyToClipboard(entry.Password);
                 ScheduleClipboardClear(config.ClipboardClearSeconds);
                 Console.Error.WriteLine($"Password copied to clipboard (cleared in {config.ClipboardClearSeconds}s)");
-            }
-            else
-            {
-                Console.WriteLine($"Password: {entry.Password}");
             }
 
             Console.WriteLine($"URL:      {entry.Url}");
@@ -255,7 +255,7 @@ static class Commands
 
             if (entry.Tags is { Count: > 0 })
                 Console.WriteLine($"Tags:     {string.Join(", ", entry.Tags)}");
-        }, nameArg, clipOpt);
+        }, nameArg, showOpt);
 
         return cmd;
     }

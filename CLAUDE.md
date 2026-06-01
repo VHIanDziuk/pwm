@@ -59,10 +59,10 @@ Each vault entry stores:
 
 ## Claude Usage
 
-`pwm get <name>` outputs credentials to stdout so Claude can pipe them into tasks (e.g. logging into a service). The session token and daemon mean subsequent calls within a working session require no password re-entry. Example:
+`pwm get <name> --show` outputs credentials to stdout so Claude can pipe them into tasks (e.g. logging into a service). The `--show` flag is required to print the password; without it the password is copied to the clipboard only. The session token and daemon mean subsequent calls within a working session require no password re-entry. Example:
 
 ```bash
-pwm get github
+pwm get github --show
 # outputs: name, username, password, url, notes (and tags if set)
 ```
 
@@ -72,7 +72,7 @@ If the daemon is running and the vault is unlocked, `pwm get` is near-instant wi
 
 - Master password is never stored; only the derived key is used in-memory
 - Vault file is unreadable without the master password
-- `pwm get` intentionally prints to stdout for automation — use in trusted environments only
+- `pwm get` copies the password to the clipboard by default; use `--show` to print to stdout for automation — use only in trusted environments
 - Session token at `~/.pwm/session` encrypts the master password with an ephemeral AES-256 key; TTL default 15 min; `pwm lock` clears it
 - TOTP secrets are stored inside the encrypted vault; `pwm get` verifies a 6-digit code before printing credentials when a secret is present
 - Daemon holds the vault and master password in process memory; `pwm daemon stop` zeroes all key material before exit
