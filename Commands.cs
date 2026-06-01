@@ -362,12 +362,13 @@ static class Commands
         var nameArg      = new Argument<string>("name");
         var lengthOpt    = new Option<int>("--length", () => 24, "Password length (default 24)");
         var noSymbolsOpt = new Option<bool>("--no-symbols", () => false, "Exclude symbols from the character set");
+        var clipOpt      = new Option<bool>("--clip", "Copy generated password to clipboard instead of printing it");
         var cmd = new Command("generate", "Generate a random password and store it as a new entry")
         {
-            nameArg, lengthOpt, noSymbolsOpt
+            nameArg, lengthOpt, noSymbolsOpt, clipOpt
         };
 
-        cmd.SetHandler((string name, int length, bool noSymbols) =>
+        cmd.SetHandler((string name, int length, bool noSymbols, bool clip) =>
         {
             if (length < 1)
             {
@@ -405,8 +406,17 @@ static class Commands
             entries.Add(new VaultEntry(name, username, password, url, notes));
             VaultStore.Save(entries, master, config.Pbkdf2Iterations);
 
-            Console.WriteLine($"Generated password: {password}");
-        }, nameArg, lengthOpt, noSymbolsOpt);
+            if (clip)
+            {
+                CopyToClipboard(password);
+                ScheduleClipboardClear(config.ClipboardClearSeconds);
+                Console.WriteLine($"Password generated and copied to clipboard (cleared in {config.ClipboardClearSeconds}s)");
+            }
+            else
+            {
+                Console.WriteLine($"Generated password: {password}");
+            }
+        }, nameArg, lengthOpt, noSymbolsOpt, clipOpt);
 
         return cmd;
     }

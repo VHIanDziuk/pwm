@@ -145,6 +145,30 @@ pbkdf2_iterations = 600000       # default, can increase
 
 The config file is plaintext and does not affect vault security. PBKDF2 iteration count override applies only to new saves; existing vaults retain their stored iteration count.
 
+### One-step password regeneration with clipboard copy
+
+Add a `--clip` flag to `pwm generate` so a new random password can be generated, saved to the vault, and placed on the clipboard in a single command — without the password ever appearing on screen.
+
+```
+pwm generate <name> [--length <n>] [--no-symbols] [--clip]
+```
+
+When `--clip` is passed:
+
+- The generated password is stored in the vault as usual.
+- The password is copied to the clipboard instead of being printed to stdout.
+- The clipboard is cleared after the configured timeout (default: 30 seconds, same as `pwm get --clip`).
+- stdout shows only a confirmation line: `Password generated and copied to clipboard (cleared in 30s)`.
+
+This is the intended flow for creating or rotating a credential for a new account:
+
+```bash
+pwm generate myservice --clip
+# opens browser, pastes from clipboard, never sees the password
+```
+
+For existing entries, `pwm update <name>` with a blank password field keeps the old value. A future `pwm rotate <name>` command (not in scope here) would regenerate the password on an existing entry in-place; for now, delete and regenerate, or use `pwm update` with a manually typed new password.
+
 ---
 
 ## v1.3 — Recovery
