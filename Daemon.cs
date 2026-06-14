@@ -54,8 +54,8 @@ static class Daemon
         server.Bind(endpoint);
         server.Listen(backlog: 8);
 
-        // Restrict socket file to owner on Unix; best-effort on Windows.
-        try { File.SetUnixFileMode(SocketPath, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { }
+        if (!OperatingSystem.IsWindows())
+            try { File.SetUnixFileMode(SocketPath, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { }
 
         server.ReceiveTimeout = 500; // ms — allows the accept loop to poll idle timeout
 

@@ -2,7 +2,7 @@
 
 ## Project Goal
 
-A .NET 8 console application for password management, usable as a CLI tool for quick access to credentials. Claude can read passwords from this tool to authenticate into services on the user's behalf.
+A .NET 8 console application for password management, usable as a CLI tool for quick access to credentials.
 
 ## Architecture
 

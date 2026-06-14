@@ -109,7 +109,8 @@ static class SessionStore
 
             var tmp = SessionPath + ".tmp";
             File.WriteAllBytes(tmp, blob);
-            try { File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { }
+            if (!OperatingSystem.IsWindows())
+                try { File.SetUnixFileMode(tmp, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { }
             File.Move(tmp, SessionPath, overwrite: true);
 
             CryptographicOperations.ZeroMemory(blob);
